@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="${0:A:h}"
 OUTPUT_DIR="${1:-$ROOT_DIR/dist}"
 APP_NAME="柯基小小.app"
-ARCHIVE_NAME="柯基小小-macOS.zip"
+ARCHIVE_NAME="Corgi-Xiaoxiao-macOS.zip"
+DOWNLOAD_URL="https://github.com/moxian1993/xiaoxiao-pet/releases/latest/download/$ARCHIVE_NAME"
 APP_DIR="$OUTPUT_DIR/$APP_NAME"
 BUILD_DIR="$ROOT_DIR/build"
 MODULE_CACHE_DIR="$BUILD_DIR/ModuleCache"
@@ -36,6 +37,6 @@ BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/I
 rm -f "$OUTPUT_DIR/$ARCHIVE_NAME"
 ditto -c -k --norsrc --keepParent "$APP_DIR" "$OUTPUT_DIR/$ARCHIVE_NAME"
 ARCHIVE_SHA256=$(/usr/bin/shasum -a 256 "$OUTPUT_DIR/$ARCHIVE_NAME" | /usr/bin/awk '{print $1}')
-/usr/bin/printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "build": %s,\n  "releaseNotes": "将右键菜单中的‘检查本地更新…’简化为‘更新’。",\n  "platforms": {\n    "macos": {\n      "archive": "%s",\n      "sha256": "%s",\n      "url": null\n    }\n  }\n}\n' \
-  "$VERSION" "$BUILD" "$ARCHIVE_NAME" "$ARCHIVE_SHA256" > "$OUTPUT_DIR/update.json"
+/usr/bin/printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "build": %s,\n  "releaseNotes": "更新功能已切换为从 GitHub Releases 在线检查和下载。",\n  "platforms": {\n    "macos": {\n      "archive": "%s",\n      "sha256": "%s",\n      "url": "%s"\n    }\n  }\n}\n' \
+  "$VERSION" "$BUILD" "$ARCHIVE_NAME" "$ARCHIVE_SHA256" "$DOWNLOAD_URL" > "$OUTPUT_DIR/update.json"
 echo "$APP_DIR"

@@ -12,7 +12,7 @@ RUNNING_PID="$8"
 
 LOG_DIR="$SUPPORT_DIR/Logs"
 BACKUP_DIR="$SUPPORT_DIR/Backups"
-LOG_FILE="$LOG_DIR/local-update.log"
+LOG_FILE="$LOG_DIR/update.log"
 EXTRACT_DIR="$WORK_DIR/extracted"
 TARGET_PARENT="${TARGET_APP:h}"
 TARGET_NAME="${TARGET_APP:t}"
@@ -38,7 +38,7 @@ fail() {
     exit 1
 }
 
-log "开始安装本地更新：$ARCHIVE_PATH"
+log "开始安装更新：$ARCHIVE_PATH"
 
 ACTUAL_ARCHIVE_HASH=$(/usr/bin/shasum -a 256 "$ARCHIVE_PATH" 2>/dev/null | /usr/bin/awk '{print $1}') \
     || fail "无法再次校验更新包"

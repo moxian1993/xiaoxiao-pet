@@ -1,5 +1,9 @@
 import AppKit
 
+private enum RemoteUpdate {
+    static let manifestURL = URL(string: "https://github.com/moxian1993/xiaoxiao-pet/releases/latest/download/update.json")!
+}
+
 private struct UpdateManifest: Decodable {
     let schemaVersion: Int
     let version: String
@@ -493,7 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         topItem.state = alwaysOnTop ? .on : .off
         menu.addItem(topItem)
         menu.addItem(.separator())
-        menu.addItem(item("更新", #selector(checkLocalUpdate)))
+        menu.addItem(item("更新", #selector(checkRemoteUpdate)))
         menu.addItem(.separator())
         menu.addItem(item("退出柯基小小", #selector(quitApp)))
         return menu
@@ -1157,77 +1161,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    @objc private func checkLocalUpdate() {
+    @objc private func checkRemoteUpdate() {
         guard !isPreparingUpdate else { return }
         isPreparingUpdate = true
-        defer { isPreparingUpdate = false }
 
-        do {
-            let updateDirectory = try localUpdateDirectory()
-            let manifestURL = updateDirectory.appendingPathComponent("update.json", isDirectory: false)
-            guard FileManager.default.fileExists(atPath: manifestURL.path) else {
-                showUpdateMessage(
-                    title: "还没有本地更新",
-                    message: "请先运行“发布本地更新.command”。\n\n更新目录：\n\(updateDirectory.path)"
-                )
-                return
-            }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isPreparingUpdate = false }
 
-            let manifest = try JSONDecoder().decode(UpdateManifest.self, from: Data(contentsOf: manifestURL))
-            guard manifest.schemaVersion == 1 else {
-                throw updateError("不支持此更新清单格式。")
+            do {
+                try await self.prepareRemoteUpdate()
+            } catch {
+                self.showUpdateMessage(title: "无法更新", message: error.localizedDescription, style: .critical)
             }
-            guard let package = manifest.platforms["macos"] else {
-                throw updateError("更新清单中没有 macOS 安装包。")
-            }
-
-            let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-            let currentBuildNumber = Int(currentBuild) ?? 0
-            guard manifest.build > currentBuildNumber else {
-                showUpdateMessage(
-                    title: "已经是最新版本",
-                    message: "当前版本：\(currentVersionDescription())\n本地版本：\(manifest.version) (\(manifest.build))"
-                )
-                return
-            }
-
-            guard package.archive == URL(fileURLWithPath: package.archive).lastPathComponent,
-                  !package.archive.contains("/"), !package.archive.contains(":") else {
-                throw updateError("更新包文件名不安全。")
-            }
-            let archiveURL = updateDirectory.appendingPathComponent(package.archive, isDirectory: false)
-            guard FileManager.default.fileExists(atPath: archiveURL.path) else {
-                throw updateError("找不到更新包：\(package.archive)")
-            }
-
-            let actualHash = try sha256(of: archiveURL)
-            guard actualHash.caseInsensitiveCompare(package.sha256) == .orderedSame else {
-                throw updateError("更新包校验失败，文件可能不完整。")
-            }
-
-            let notes = manifest.releaseNotes?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let detail = (notes?.isEmpty == false ? notes! : "包含功能改进和问题修复。")
-            let alert = NSAlert()
-            alert.messageText = "发现本地更新 \(manifest.version)"
-            alert.informativeText = "当前版本：\(currentVersionDescription())\n目标版本：\(manifest.version) (\(manifest.build))\n\n\(detail)\n\n更新时柯基会退出并自动重新打开。"
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "立即更新")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-            try launchUpdateInstaller(
-                archiveURL: archiveURL,
-                expectedHash: actualHash,
-                targetBuild: manifest.build,
-                updateDirectory: updateDirectory
-            )
-            quitApp()
-        } catch {
-            showUpdateMessage(title: "无法更新", message: error.localizedDescription, style: .critical)
         }
     }
 
-    private func localUpdateDirectory() throws -> URL {
+    @MainActor
+    private func prepareRemoteUpdate() async throws {
+        let (manifestData, manifestResponse) = try await URLSession.shared.data(from: RemoteUpdate.manifestURL)
+        try validateRemoteResponse(manifestResponse, action: "获取更新信息")
+
+        let manifest = try JSONDecoder().decode(UpdateManifest.self, from: manifestData)
+        guard manifest.schemaVersion == 1 else {
+            throw updateError("不支持此更新清单格式。")
+        }
+        guard let package = manifest.platforms["macos"] else {
+            throw updateError("更新清单中没有 macOS 安装包。")
+        }
+
+        let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        let currentBuildNumber = Int(currentBuild) ?? 0
+        guard manifest.build > currentBuildNumber else {
+            showUpdateMessage(
+                title: "已经是最新版本",
+                message: "当前版本：\(currentVersionDescription())\n线上版本：\(manifest.version) (\(manifest.build))"
+            )
+            return
+        }
+
+        guard package.archive == URL(fileURLWithPath: package.archive).lastPathComponent,
+              !package.archive.contains("/"), !package.archive.contains(":") else {
+            throw updateError("更新包文件名不安全。")
+        }
+        guard let remoteArchiveAddress = package.url,
+              let remoteArchiveURL = URL(string: remoteArchiveAddress, relativeTo: RemoteUpdate.manifestURL)?.absoluteURL,
+              remoteArchiveURL.scheme?.lowercased() == "https" else {
+            throw updateError("更新清单中的下载地址无效。")
+        }
+
+        let notes = manifest.releaseNotes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = (notes?.isEmpty == false ? notes! : "包含功能改进和问题修复。")
+        let alert = NSAlert()
+        alert.messageText = "发现线上更新 \(manifest.version)"
+        alert.informativeText = "当前版本：\(currentVersionDescription())\n目标版本：\(manifest.version) (\(manifest.build))\n\n\(detail)\n\n下载完成后柯基会退出、安装新版并自动重新打开。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "立即更新")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let (downloadURL, downloadResponse) = try await URLSession.shared.download(from: remoteArchiveURL)
+        try validateRemoteResponse(downloadResponse, action: "下载更新包")
+
+        let actualHash = try sha256(of: downloadURL)
+        guard actualHash.caseInsensitiveCompare(package.sha256) == .orderedSame else {
+            throw updateError("更新包校验失败，文件可能不完整。")
+        }
+
+        let updateDirectory = try updateDirectory()
+        let archiveURL = updateDirectory.appendingPathComponent(package.archive, isDirectory: false)
+        let stagingURL = updateDirectory.appendingPathComponent(".\(UUID().uuidString).download", isDirectory: false)
+        try FileManager.default.copyItem(at: downloadURL, to: stagingURL)
+        defer { try? FileManager.default.removeItem(at: stagingURL) }
+        if FileManager.default.fileExists(atPath: archiveURL.path) {
+            try FileManager.default.removeItem(at: archiveURL)
+        }
+        try FileManager.default.moveItem(at: stagingURL, to: archiveURL)
+
+        try launchUpdateInstaller(
+            archiveURL: archiveURL,
+            expectedHash: actualHash,
+            targetBuild: manifest.build,
+            updateDirectory: updateDirectory
+        )
+        quitApp()
+    }
+
+    private func validateRemoteResponse(_ response: URLResponse, action: String) throws {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            throw updateError("\(action)失败，请稍后重试。")
+        }
+    }
+
+    private func updateDirectory() throws -> URL {
         let base = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
