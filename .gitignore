@@ -1,0 +1,14 @@
+# macOS metadata
+.DS_Store
+
+# Generated release artifacts
+/outputs/
+
+# Local build and compiler caches
+**/build/
+**/ModuleCache/
+
+# Temporary preview artifacts
+**/preview/
+**/previews/
+
