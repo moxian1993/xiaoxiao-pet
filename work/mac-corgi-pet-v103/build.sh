@@ -37,6 +37,6 @@ BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_DIR/Contents/I
 rm -f "$OUTPUT_DIR/$ARCHIVE_NAME"
 ditto -c -k --norsrc --keepParent "$APP_DIR" "$OUTPUT_DIR/$ARCHIVE_NAME"
 ARCHIVE_SHA256=$(/usr/bin/shasum -a 256 "$OUTPUT_DIR/$ARCHIVE_NAME" | /usr/bin/awk '{print $1}')
-/usr/bin/printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "build": %s,\n  "releaseNotes": "更新功能已切换为从 GitHub Releases 在线检查和下载。",\n  "platforms": {\n    "macos": {\n      "archive": "%s",\n      "sha256": "%s",\n      "url": "%s"\n    }\n  }\n}\n' \
+/usr/bin/printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "build": %s,\n  "releaseNotes": "优化扭屁股动作并新增无聊翻滚动作。",\n  "platforms": {\n    "macos": {\n      "archive": "%s",\n      "sha256": "%s",\n      "url": "%s"\n    }\n  }\n}\n' \
   "$VERSION" "$BUILD" "$ARCHIVE_NAME" "$ARCHIVE_SHA256" "$DOWNLOAD_URL" > "$OUTPUT_DIR/update.json"
 echo "$APP_DIR"
