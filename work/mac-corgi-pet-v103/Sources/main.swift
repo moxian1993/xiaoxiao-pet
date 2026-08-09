@@ -30,7 +30,7 @@ private enum SpriteRow: Int {
     case runningRight
     case dance
     case jump
-    case sleepEntryFirst
+    case boredom
     case sleepEntrySecond
     case sleepIdle
     case petting
@@ -62,6 +62,7 @@ private enum PetAction {
     case sleep
     case gaze
     case dance
+    case boredom
     case petting
     case roll
     case spin
@@ -487,6 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("注视", #selector(playGaze)))
         menu.addItem(item("散步", #selector(playWalk)))
         menu.addItem(item("扭屁股", #selector(playDance)))
+        menu.addItem(item("无聊", #selector(playBoredom)))
         menu.addItem(optimizationMenuItem())
         menu.addItem(.separator())
         menu.addItem(scaleMenuItem())
@@ -600,9 +602,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.animator.play(row: .dance, frames: Array(0..<8), interval: 0.125, loops: 2) { [weak self] in
                 guard let self else { return }
                 self.animator.setFacingLeft(false)
-                self.setTemporaryActionScale(1)
-                self.finishInteraction()
+                self.animator.play(row: .dance, frames: Array(0..<8), interval: 0.125, loops: 2) { [weak self] in
+                    guard let self else { return }
+                    self.animator.setFacingLeft(true)
+                    self.animator.play(row: .dance, frames: Array(0..<8), interval: 0.125, loops: 2) { [weak self] in
+                        guard let self else { return }
+                        self.animator.setFacingLeft(false)
+                        self.setTemporaryActionScale(1)
+                        self.finishInteraction()
+                    }
+                }
             }
+        }
+    }
+
+    @objc private func playBoredom() {
+        registerInteraction()
+        currentAction = .boredom
+        let frames = [3, 4, 0, 1, 2, 5, 6, 7, 6, 5, 2, 1, 0, 4, 3]
+        animator.play(row: .boredom, frames: frames, interval: 0.13, loops: 2) { [weak self] in
+            self?.finishInteraction()
         }
     }
 
@@ -745,6 +764,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if appliedIdleAction == .automatic { scheduleAutomaticIdleRotation() }
         case .dance:
             playDance()
+        case .boredom:
+            playBoredom()
         case .petting:
             playPetting()
         case .roll:
