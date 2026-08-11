@@ -752,16 +752,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func playBoredom() {
         registerInteraction()
         currentAction = .boredom
+        animator.setFacingLeft(false)
+        playBoredomCycle(remainingCycles: 3)
+    }
+
+    private func playBoredomCycle(remainingCycles: Int) {
+        guard remainingCycles > 0 else {
+            finishInteraction()
+            return
+        }
         let framesBeforePause = [3, 4, 0, 1, 2, 5, 6]
         let framesAfterPause = [7, 6, 5, 2, 1, 0, 4, 3]
         let interval = 0.13 / 0.8
-        animator.setFacingLeft(false)
         animator.play(row: .boredom, frames: framesBeforePause, interval: interval, loops: 1) { [weak self] in
             guard let self else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                 guard let self else { return }
                 self.animator.play(row: .boredom, frames: framesAfterPause, interval: interval, loops: 1) { [weak self] in
-                    self?.finishInteraction()
+                    self?.playBoredomCycle(remainingCycles: remainingCycles - 1)
                 }
             }
         }
