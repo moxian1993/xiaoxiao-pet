@@ -20,6 +20,18 @@ if (-not (Test-Path -LiteralPath $atlasPath)) {
     exit 1
 }
 
+$versionPath = Join-Path $PSScriptRoot 'version.json'
+try {
+    $versionInfo = Get-Content -LiteralPath $versionPath -Raw | ConvertFrom-Json
+    $script:appVersion = [string]$versionInfo.version
+    $script:appBuild = [int]$versionInfo.build
+}
+catch {
+    [System.Windows.MessageBox]::Show("无法读取版本信息：`n$versionPath", '柯基小小') | Out-Null
+    exit 1
+}
+$script:updateManifestUrl = 'https://github.com/moxian1993/xiaoxiao-pet/releases/latest/download/update.json'
+
 $cellWidth = 192
 $cellHeight = 208
 $columns = 8
@@ -152,6 +164,17 @@ $script:dragShouldLift = $false
 $script:userScale = [double]$settings.Scale
 $script:temporaryScale = 1.0
 $script:boredomResumeAt = [DateTime]::MaxValue
+$script:isCheckingUpdate = $false
+$script:updateClient = $null
+$script:updateProgressWindow = $null
+$script:updateProgressLabel = $null
+$script:updateProgressBar = $null
+$script:updateStagingPath = $null
+$script:updateArchivePath = $null
+$script:updateExpectedHash = $null
+$script:updateTargetBuild = 0
+$script:updateNotes = @()
+$script:updateInstallerStarted = $false
 
 function Get-PetFrame {
     param([int]$Row, [int]$Column)
@@ -733,6 +756,291 @@ function New-PetMenuItem {
     return $item
 }
 
+function Get-UpdateNotes {
+    param($Manifest, [int]$CurrentBuild)
+
+    $notes = @()
+    foreach ($release in @($Manifest.releases)) {
+        if ([int]$release.build -gt $CurrentBuild -and [int]$release.build -le [int]$Manifest.build) {
+            foreach ($note in @($release.notes)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$note)) {
+                    $notes += [string]$note
+                }
+            }
+        }
+    }
+    if ($notes.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$Manifest.releaseNotes)) {
+        $notes += [string]$Manifest.releaseNotes
+    }
+    return $notes
+}
+
+function Close-UpdateProgress {
+    if ($null -ne $script:updateProgressWindow) {
+        $script:updateProgressWindow.Close()
+    }
+    $script:updateProgressWindow = $null
+    $script:updateProgressLabel = $null
+    $script:updateProgressBar = $null
+}
+
+function Reset-UpdateState {
+    Close-UpdateProgress
+    if ($null -ne $script:updateClient) {
+        $script:updateClient.Dispose()
+    }
+    $script:updateClient = $null
+    $script:isCheckingUpdate = $false
+    if ($null -ne $updateMenuItem) {
+        $updateMenuItem.IsEnabled = $true
+    }
+}
+
+function Show-UpdateFailure {
+    param([string]$Message)
+
+    if (-not [string]::IsNullOrWhiteSpace($script:updateStagingPath) -and (Test-Path -LiteralPath $script:updateStagingPath)) {
+        Remove-Item -LiteralPath $script:updateStagingPath -Force -ErrorAction SilentlyContinue
+    }
+    Reset-UpdateState
+    [System.Windows.MessageBox]::Show($Message, '无法更新', 'OK', 'Error') | Out-Null
+}
+
+function Show-UpdateProgress {
+    $progressWindow = New-Object System.Windows.Window
+    $progressWindow.Title = '正在更新'
+    $progressWindow.Width = 340
+    $progressWindow.Height = 132
+    $progressWindow.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $progressWindow.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+    $progressWindow.ShowInTaskbar = $false
+    $progressWindow.Owner = $window
+
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $panel.Margin = [System.Windows.Thickness]::new(24)
+    $label = New-Object System.Windows.Controls.TextBlock
+    $label.Text = '正在下载更新…'
+    $label.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $bar = New-Object System.Windows.Controls.ProgressBar
+    $bar.Height = 18
+    $bar.Minimum = 0
+    $bar.Maximum = 100
+    $bar.IsIndeterminate = $true
+    $panel.Children.Add($label) | Out-Null
+    $panel.Children.Add($bar) | Out-Null
+    $progressWindow.Content = $panel
+
+    $script:updateProgressWindow = $progressWindow
+    $script:updateProgressLabel = $label
+    $script:updateProgressBar = $bar
+    $progressWindow.Show()
+}
+
+function Test-UpdateTargetWritable {
+    $targetParent = Split-Path -Parent $PSScriptRoot
+    $probePath = Join-Path $targetParent ('.corgi-update-probe-{0}' -f [Guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $probePath | Out-Null
+        Remove-Item -LiteralPath $probePath -Force
+        return $true
+    }
+    catch {
+        if (Test-Path -LiteralPath $probePath) {
+            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+        }
+        return $false
+    }
+}
+
+function Start-UpdateInstaller {
+    param(
+        [string]$ArchivePath,
+        [string]$ExpectedHash,
+        [int]$TargetBuild,
+        [string[]]$UpdateNotes
+    )
+
+    if (-not (Test-UpdateTargetWritable)) {
+        throw '当前程序所在目录不可写。请把完整文件夹移动到桌面或其他可写目录后再更新。'
+    }
+
+    $helperSource = Join-Path $PSScriptRoot 'install-update.ps1'
+    if (-not (Test-Path -LiteralPath $helperSource)) {
+        throw '程序内缺少更新助手。'
+    }
+
+    $updatesDirectory = Join-Path $settingsDirectory 'Updates'
+    New-Item -ItemType Directory -Path $updatesDirectory -Force | Out-Null
+    $workDirectory = Join-Path ([IO.Path]::GetTempPath()) ('CorgiPetUpdate-{0}' -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
+    $helperPath = Join-Path $workDirectory 'install-update.ps1'
+    Copy-Item -LiteralPath $helperSource -Destination $helperPath
+
+    $successMessage = if ($UpdateNotes.Count -gt 0) {
+        "更新内容：`n" + (($UpdateNotes | ForEach-Object { "• $_" }) -join "`n")
+    }
+    else {
+        '更新已完成。'
+    }
+    $successMessagePath = Join-Path $workDirectory 'success-message.txt'
+    Set-Content -LiteralPath $successMessagePath -Value $successMessage -Encoding Unicode
+
+    $powershellPath = Join-Path $PSHOME 'powershell.exe'
+    $arguments = @(
+        '-NoProfile',
+        '-WindowStyle Hidden',
+        '-ExecutionPolicy Bypass',
+        ('-File "{0}"' -f $helperPath),
+        ('-ArchivePath "{0}"' -f $ArchivePath),
+        ('-ExpectedHash "{0}"' -f $ExpectedHash),
+        ('-TargetDirectory "{0}"' -f $PSScriptRoot),
+        ('-ExpectedBuild {0}' -f $TargetBuild),
+        ('-SupportDirectory "{0}"' -f $settingsDirectory),
+        ('-WorkDirectory "{0}"' -f $workDirectory),
+        ('-RunningPid {0}' -f $PID),
+        ('-SuccessMessagePath "{0}"' -f $successMessagePath)
+    ) -join ' '
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $powershellPath
+    $startInfo.Arguments = $arguments
+    $startInfo.WorkingDirectory = $updatesDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $installer = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $installer) {
+        throw '无法启动更新助手。'
+    }
+
+    $script:updateInstallerStarted = $true
+    Close-UpdateProgress
+    $window.Close()
+}
+
+function Start-UpdateDownload {
+    param(
+        [Uri]$RemoteArchiveUri,
+        [string]$ArchiveName,
+        [string]$ExpectedHash,
+        [int]$TargetBuild,
+        [string[]]$UpdateNotes
+    )
+
+    $updatesDirectory = Join-Path $settingsDirectory 'Updates'
+    New-Item -ItemType Directory -Path $updatesDirectory -Force | Out-Null
+    $script:updateArchivePath = Join-Path $updatesDirectory $ArchiveName
+    $script:updateStagingPath = Join-Path $updatesDirectory ('.{0}.download' -f [Guid]::NewGuid().ToString('N'))
+    $script:updateExpectedHash = $ExpectedHash
+    $script:updateTargetBuild = $TargetBuild
+    $script:updateNotes = $UpdateNotes
+
+    Show-UpdateProgress
+    $script:updateClient = New-Object System.Net.WebClient
+    $script:updateClient.Headers.Add('User-Agent', 'Corgi-Xiaoxiao-Windows-Updater')
+    $script:updateClient.add_DownloadProgressChanged({
+        param($sender, $eventArgs)
+        if ($null -ne $script:updateProgressBar) {
+            $script:updateProgressBar.IsIndeterminate = ($eventArgs.TotalBytesToReceive -le 0)
+            if ($eventArgs.TotalBytesToReceive -gt 0) {
+                $script:updateProgressBar.Value = $eventArgs.ProgressPercentage
+                $script:updateProgressLabel.Text = "正在下载更新… $($eventArgs.ProgressPercentage)%"
+            }
+        }
+    })
+    $script:updateClient.add_DownloadFileCompleted({
+        param($sender, $eventArgs)
+        if ($eventArgs.Cancelled) {
+            Show-UpdateFailure -Message '更新下载已取消。'
+            return
+        }
+        if ($null -ne $eventArgs.Error) {
+            Show-UpdateFailure -Message ("下载更新包失败：{0}" -f $eventArgs.Error.Message)
+            return
+        }
+
+        try {
+            $script:updateProgressBar.IsIndeterminate = $true
+            $script:updateProgressLabel.Text = '正在校验更新包…'
+            $actualHash = (Get-FileHash -LiteralPath $script:updateStagingPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $script:updateExpectedHash.ToLowerInvariant()) {
+                throw '更新包校验失败，文件可能不完整。'
+            }
+            if (Test-Path -LiteralPath $script:updateArchivePath) {
+                Remove-Item -LiteralPath $script:updateArchivePath -Force
+            }
+            Move-Item -LiteralPath $script:updateStagingPath -Destination $script:updateArchivePath
+            $script:updateProgressLabel.Text = '正在准备安装…'
+            Start-UpdateInstaller -ArchivePath $script:updateArchivePath -ExpectedHash $actualHash -TargetBuild $script:updateTargetBuild -UpdateNotes $script:updateNotes
+        }
+        catch {
+            Show-UpdateFailure -Message $_.Exception.Message
+        }
+    })
+    $script:updateClient.DownloadFileAsync($RemoteArchiveUri, $script:updateStagingPath)
+}
+
+function Check-RemoteUpdate {
+    if ($script:isCheckingUpdate) { return }
+    $script:isCheckingUpdate = $true
+    $updateMenuItem.IsEnabled = $false
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $manifestClient = New-Object System.Net.WebClient
+        $manifestClient.Headers.Add('User-Agent', 'Corgi-Xiaoxiao-Windows-Updater')
+        try {
+            $manifest = $manifestClient.DownloadString($script:updateManifestUrl) | ConvertFrom-Json
+        }
+        finally {
+            $manifestClient.Dispose()
+        }
+
+        if ([int]$manifest.schemaVersion -ne 1) {
+            throw '不支持此更新清单格式。'
+        }
+        $package = $manifest.platforms.windows
+        if ($null -eq $package) {
+            throw '更新清单中没有 Windows 安装包。'
+        }
+        if ([int]$manifest.build -le $script:appBuild) {
+            Reset-UpdateState
+            [System.Windows.MessageBox]::Show('当前已是最新版本。', '已经是最新版本') | Out-Null
+            return
+        }
+
+        $archiveName = [string]$package.archive
+        if ([IO.Path]::GetFileName($archiveName) -ne $archiveName -or $archiveName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+            throw '更新包文件名不安全。'
+        }
+        $remoteArchiveUri = [Uri]::new([string]$package.url, [UriKind]::Absolute)
+        if ($remoteArchiveUri.Scheme -ne 'https') {
+            throw '更新清单中的下载地址无效。'
+        }
+        $expectedHash = [string]$package.sha256
+        if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+            throw '更新包校验值无效。'
+        }
+
+        $updateNotes = @(Get-UpdateNotes -Manifest $manifest -CurrentBuild $script:appBuild)
+        $message = if ([int]$manifest.build -eq ($script:appBuild + 1) -and $updateNotes.Count -gt 0) {
+            "更新内容：`n" + (($updateNotes | ForEach-Object { "• $_" }) -join "`n") + "`n`n下载完成后会自动安装。"
+        }
+        else {
+            "检测到可用更新。`n`n下载完成后会自动安装。"
+        }
+        $result = [System.Windows.MessageBox]::Show($message, '可以更新', 'YesNo', 'Information')
+        if ($result -ne [System.Windows.MessageBoxResult]::Yes) {
+            Reset-UpdateState
+            return
+        }
+
+        Start-UpdateDownload -RemoteArchiveUri $remoteArchiveUri -ArchiveName $archiveName -ExpectedHash $expectedHash -TargetBuild ([int]$manifest.build) -UpdateNotes $updateNotes
+    }
+    catch {
+        Show-UpdateFailure -Message $_.Exception.Message
+    }
+}
+
 $menu = New-Object System.Windows.Controls.ContextMenu
 $menu.Items.Add((New-PetMenuItem '陪伴' { Start-Companion; if ($script:appliedIdleAction -eq 'automatic') { Schedule-AutomaticRotation } })) | Out-Null
 $menu.Items.Add((New-PetMenuItem '睡觉' { Start-Sleep; if ($script:appliedIdleAction -eq 'automatic') { Schedule-AutomaticRotation } })) | Out-Null
@@ -823,6 +1131,9 @@ $topItem.Add_Click({
     Save-Settings
 })
 $menu.Items.Add($topItem) | Out-Null
+$menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
+$updateMenuItem = New-PetMenuItem '更新' { Check-RemoteUpdate }
+$menu.Items.Add($updateMenuItem) | Out-Null
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 $menu.Items.Add((New-PetMenuItem '退出柯基小小' { $window.Close() })) | Out-Null
 $window.ContextMenu = $menu
@@ -943,6 +1254,9 @@ $timer.Add_Tick({
 $window.Add_Loaded({ Clamp-ToDesktop })
 $window.Add_Closing({
     $script:isClosing = $true
+    if (-not $script:updateInstallerStarted -and $null -ne $script:updateClient -and $script:updateClient.IsBusy) {
+        $script:updateClient.CancelAsync()
+    }
     $timer.Stop()
     Save-Settings
 })
