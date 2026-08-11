@@ -9,7 +9,25 @@ private struct UpdateManifest: Decodable {
     let version: String
     let build: Int
     let releaseNotes: String?
+    let releases: [UpdateRelease]?
     let platforms: [String: UpdatePackage]
+
+    func notes(after build: Int) -> [String] {
+        let collected = (releases ?? [])
+            .filter { $0.build > build && $0.build <= self.build }
+            .sorted { $0.build < $1.build }
+            .flatMap(\.notes)
+        if !collected.isEmpty { return collected }
+
+        guard let releaseNotes else { return [] }
+        let note = releaseNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        return note.isEmpty ? [] : [note]
+    }
+}
+
+private struct UpdateRelease: Decodable {
+    let build: Int
+    let notes: [String]
 }
 
 private struct UpdatePackage: Decodable {
@@ -34,8 +52,6 @@ private enum SpriteRow: Int {
     case sleepEntrySecond
     case sleepIdle
     case petting
-    case roll
-    case spin
     case gazeFirstHalf
     case gazeSecondHalf
     case companionEntry
@@ -64,8 +80,6 @@ private enum PetAction {
     case dance
     case boredom
     case petting
-    case roll
-    case spin
     case running
     case jumping
 }
@@ -362,6 +376,127 @@ private final class PetPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private final class UpdateDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let progressHandler: @Sendable (Int64, Int64) -> Void
+    private var receivedData = Data()
+    private var response: URLResponse?
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var session: URLSession?
+
+    init(progressHandler: @escaping @Sendable (Int64, Int64) -> Void) {
+        self.progressHandler = progressHandler
+    }
+
+    func download(from url: URL) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+            self.session = session
+            session.dataTask(with: url).resume()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        self.response = response
+        progressHandler(0, response.expectedContentLength)
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        receivedData.append(data)
+        progressHandler(Int64(receivedData.count), response?.expectedContentLength ?? -1)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer {
+            continuation = nil
+            self.session?.finishTasksAndInvalidate()
+            self.session = nil
+        }
+        if let error {
+            continuation?.resume(throwing: error)
+        } else if let response {
+            continuation?.resume(returning: (receivedData, response))
+        } else {
+            continuation?.resume(throwing: NSError(
+                domain: "com.local.corgi-xiaoxiao.update",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "下载更新包失败，请稍后重试。"]
+            ))
+        }
+    }
+}
+
+@MainActor
+private final class UpdateProgressPanel {
+    private let panel: NSPanel
+    private let statusLabel: NSTextField
+    private let progressIndicator: NSProgressIndicator
+
+    init() {
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 112),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "正在更新"
+        panel.level = .floating
+        panel.isReleasedWhenClosed = false
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 112))
+        statusLabel = NSTextField(labelWithString: "正在下载更新…")
+        statusLabel.frame = NSRect(x: 24, y: 66, width: 272, height: 20)
+
+        progressIndicator = NSProgressIndicator(frame: NSRect(x: 24, y: 34, width: 272, height: 18))
+        progressIndicator.style = .bar
+        progressIndicator.minValue = 0
+        progressIndicator.maxValue = 1
+        progressIndicator.doubleValue = 0
+
+        contentView.addSubview(statusLabel)
+        contentView.addSubview(progressIndicator)
+        panel.contentView = contentView
+    }
+
+    func show() {
+        panel.center()
+        panel.orderFrontRegardless()
+    }
+
+    func update(received: Int64, total: Int64) {
+        guard total > 0 else {
+            statusLabel.stringValue = "正在下载更新…"
+            progressIndicator.isIndeterminate = true
+            progressIndicator.startAnimation(nil)
+            return
+        }
+        if progressIndicator.isIndeterminate {
+            progressIndicator.stopAnimation(nil)
+            progressIndicator.isIndeterminate = false
+        }
+        let progress = min(max(Double(received) / Double(total), 0), 1)
+        progressIndicator.doubleValue = progress
+        statusLabel.stringValue = "正在下载更新… \(Int((progress * 100).rounded()))%"
+    }
+
+    func showPreparingInstallation() {
+        progressIndicator.stopAnimation(nil)
+        progressIndicator.isIndeterminate = false
+        progressIndicator.doubleValue = 1
+        statusLabel.stringValue = "正在准备安装…"
+    }
+
+    func close() {
+        panel.orderOut(nil)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let baseWindowSize = NSSize(width: 230, height: 250)
     private let inactivityInterval: TimeInterval = 30
@@ -509,8 +644,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let parent = NSMenuItem(title: "待优化", action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: "待优化")
         submenu.addItem(item("摸摸", #selector(playPetting)))
-        submenu.addItem(item("连贯打滚", #selector(playRoll)))
-        submenu.addItem(item("芭蕾旋转", #selector(playSpin)))
         parent.submenu = submenu
         return parent
     }
@@ -619,9 +752,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func playBoredom() {
         registerInteraction()
         currentAction = .boredom
-        let frames = [3, 4, 0, 1, 2, 5, 6, 7, 6, 5, 2, 1, 0, 4, 3]
-        animator.play(row: .boredom, frames: frames, interval: 0.13, loops: 2) { [weak self] in
-            self?.finishInteraction()
+        let framesBeforePause = [3, 4, 0, 1, 2, 5, 6]
+        let framesAfterPause = [7, 6, 5, 2, 1, 0, 4, 3]
+        let interval = 0.13 / 0.8
+        animator.setFacingLeft(false)
+        animator.play(row: .boredom, frames: framesBeforePause, interval: interval, loops: 1) { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self else { return }
+                self.animator.play(row: .boredom, frames: framesAfterPause, interval: interval, loops: 1) { [weak self] in
+                    self?.finishInteraction()
+                }
+            }
         }
     }
 
@@ -701,11 +843,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func playRandomInteraction() {
-        switch Int.random(in: 0..<5) {
+        switch Int.random(in: 0..<3) {
         case 0: playDance()
         case 1: playPetting()
-        case 2: playRoll()
-        case 3: playSpin()
         default: playWalk()
         }
     }
@@ -768,10 +908,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             playBoredom()
         case .petting:
             playPetting()
-        case .roll:
-            playRoll()
-        case .spin:
-            playSpin()
         case .running:
             startWalking(mode: .running)
         case .jumping:
@@ -898,22 +1034,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.animator.play(row: .sleepIdle, frames: [0, 1], interval: 0.14, loops: 1) { [weak self] in
                 self?.animator.play(row: .sleepIdle, frames: [1, 2, 3, 4], interval: 0.52)
             }
-        }
-    }
-
-    @objc private func playRoll() {
-        registerInteraction()
-        currentAction = .roll
-        animator.play(row: .roll, frames: Array(0..<8), interval: 0.15, loops: 1) { [weak self] in
-            self?.finishInteraction()
-        }
-    }
-
-    @objc private func playSpin() {
-        registerInteraction()
-        currentAction = .spin
-        animator.play(row: .spin, frames: Array(0..<8), interval: 0.125, loops: 2) { [weak self] in
-            self?.finishInteraction()
         }
     }
 
@@ -1216,7 +1336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard manifest.build > currentBuildNumber else {
             showUpdateMessage(
                 title: "已经是最新版本",
-                message: "当前版本：\(currentVersionDescription())\n线上版本：\(manifest.version) (\(manifest.build))"
+                message: "当前已是最新版本。"
             )
             return
         }
@@ -1231,18 +1351,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             throw updateError("更新清单中的下载地址无效。")
         }
 
-        let notes = manifest.releaseNotes?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = (notes?.isEmpty == false ? notes! : "包含功能改进和问题修复。")
+        let updateNotes = manifest.notes(after: currentBuildNumber)
         let alert = NSAlert()
-        alert.messageText = "发现线上更新 \(manifest.version)"
-        alert.informativeText = "当前版本：\(currentVersionDescription())\n目标版本：\(manifest.version) (\(manifest.build))\n\n\(detail)\n\n下载完成后柯基会退出、安装新版并自动重新打开。"
+        alert.messageText = "可以更新"
+        if manifest.build == currentBuildNumber + 1, !updateNotes.isEmpty {
+            let content = updateNotes.enumerated()
+                .map { "\($0.offset + 1)、\($0.element)" }
+                .joined(separator: "\n")
+            alert.informativeText = "更新内容：\n\(content)\n\n下载完成后会自动安装。"
+        } else {
+            alert.informativeText = "检测到可用更新。\n\n下载完成后会自动安装。"
+        }
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "立即更新")
+        alert.addButton(withTitle: "更新")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let (downloadURL, downloadResponse) = try await URLSession.shared.download(from: remoteArchiveURL)
+        let progressPanel = UpdateProgressPanel()
+        progressPanel.show()
+        defer { progressPanel.close() }
+
+        let downloader = UpdateDownloader { received, total in
+            Task { @MainActor in
+                progressPanel.update(received: received, total: total)
+            }
+        }
+        let (downloadData, downloadResponse) = try await downloader.download(from: remoteArchiveURL)
         try validateRemoteResponse(downloadResponse, action: "下载更新包")
+
+        let downloadURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CorgiPetUpdate-\(UUID().uuidString).zip", isDirectory: false)
+        try downloadData.write(to: downloadURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: downloadURL) }
 
         let actualHash = try sha256(of: downloadURL)
         guard actualHash.caseInsensitiveCompare(package.sha256) == .orderedSame else {
@@ -1259,11 +1399,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         try FileManager.default.moveItem(at: stagingURL, to: archiveURL)
 
+        progressPanel.showPreparingInstallation()
+        let successMessage: String
+        if updateNotes.isEmpty {
+            successMessage = "更新已完成。"
+        } else {
+            let content = updateNotes.map { "• \($0)" }.joined(separator: "\n")
+            successMessage = "更新内容：\n\(content)"
+        }
+
         try launchUpdateInstaller(
             archiveURL: archiveURL,
             expectedHash: actualHash,
             targetBuild: manifest.build,
-            updateDirectory: updateDirectory
+            updateDirectory: updateDirectory,
+            successMessage: successMessage
         )
         quitApp()
     }
@@ -1289,12 +1439,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return directory
     }
 
-    private func currentVersionDescription() -> String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
-        return "\(version) (\(build))"
-    }
-
     private func sha256(of fileURL: URL) throws -> String {
         let process = Process()
         let output = Pipe()
@@ -1318,7 +1462,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         archiveURL: URL,
         expectedHash: String,
         targetBuild: Int,
-        updateDirectory: URL
+        updateDirectory: URL,
+        successMessage: String
     ) throws {
         guard let bundleIdentifier = Bundle.main.bundleIdentifier,
               let helperSource = Bundle.main.url(forResource: "install-update", withExtension: "sh") else {
@@ -1350,7 +1495,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             String(targetBuild),
             supportDirectory.path,
             workDirectory.path,
-            String(ProcessInfo.processInfo.processIdentifier)
+            String(ProcessInfo.processInfo.processIdentifier),
+            successMessage
         ]
         try process.run()
     }

@@ -9,6 +9,7 @@ EXPECTED_BUILD="$5"
 SUPPORT_DIR="$6"
 WORK_DIR="$7"
 RUNNING_PID="$8"
+SUCCESS_MESSAGE="$9"
 
 LOG_DIR="$SUPPORT_DIR/Logs"
 BACKUP_DIR="$SUPPORT_DIR/Backups"
@@ -87,6 +88,15 @@ BACKUP_APP="$BACKUP_DIR/柯基小小-build-${CURRENT_BUILD}-${TIMESTAMP}.app"
 if ! /bin/mv "$STAGED_APP" "$TARGET_APP"; then
     /bin/mv "$PREVIOUS_APP" "$TARGET_APP" >/dev/null 2>&1 || true
     fail "无法安装新版"
+fi
+
+if ! /usr/bin/osascript - "$SUCCESS_MESSAGE" <<'APPLESCRIPT'
+on run argv
+    display dialog (item 1 of argv) with title "更新成功" buttons {"重新打开"} default button "重新打开" with icon note
+end run
+APPLESCRIPT
+then
+    log "更新成功提示未能显示，将直接重新打开"
 fi
 
 if ! /usr/bin/open "$TARGET_APP"; then
