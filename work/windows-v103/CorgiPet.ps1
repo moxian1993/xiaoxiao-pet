@@ -954,7 +954,7 @@ function Start-UpdateDownload {
             return
         }
         if ($null -ne $eventArgs.Error) {
-            Show-UpdateFailure -Message ("下载更新包失败：{0}" -f $eventArgs.Error.Message)
+            Show-UpdateFailure -Message '无法连接到更新服务器。请检查网络连接后重试。'
             return
         }
 
@@ -973,7 +973,13 @@ function Start-UpdateDownload {
             Start-UpdateInstaller -ArchivePath $script:updateArchivePath -ExpectedHash $actualHash -TargetBuild $script:updateTargetBuild -UpdateNotes $script:updateNotes
         }
         catch {
-            Show-UpdateFailure -Message $_.Exception.Message
+            $failureMessage = switch ($_.Exception.Message) {
+                '更新包校验失败，文件可能不完整。' { '更新包校验失败，文件可能不完整。请重新尝试。' }
+                '当前程序所在目录不可写。请把完整文件夹移动到桌面或其他可写目录后再更新。' { $_.Exception.Message }
+                '程序内缺少更新助手。' { '当前安装不完整，请下载最新版重新安装。' }
+                default { '无法准备安装更新。请重新尝试；如仍失败，请下载最新版。' }
+            }
+            Show-UpdateFailure -Message $failureMessage
         }
     })
     $script:updateClient.DownloadFileAsync($RemoteArchiveUri, $script:updateStagingPath)
@@ -987,6 +993,7 @@ function Check-RemoteUpdate {
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $manifestClient = New-Object System.Net.WebClient
+        $manifestClient.Encoding = [System.Text.Encoding]::UTF8
         $manifestClient.Headers.Add('User-Agent', 'Corgi-Xiaoxiao-Windows-Updater')
         try {
             $manifest = $manifestClient.DownloadString($script:updateManifestUrl) | ConvertFrom-Json
@@ -1037,7 +1044,13 @@ function Check-RemoteUpdate {
         Start-UpdateDownload -RemoteArchiveUri $remoteArchiveUri -ArchiveName $archiveName -ExpectedHash $expectedHash -TargetBuild ([int]$manifest.build) -UpdateNotes $updateNotes
     }
     catch {
-        Show-UpdateFailure -Message $_.Exception.Message
+        $failureMessage = if ($_.Exception -is [System.Net.WebException]) {
+            '无法连接到更新服务器。请检查网络连接后重试。'
+        }
+        else {
+            '更新信息格式异常，请稍后重试或下载最新版。'
+        }
+        Show-UpdateFailure -Message $failureMessage
     }
 }
 
