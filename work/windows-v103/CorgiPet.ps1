@@ -27,19 +27,17 @@ $rows = @{
     RunningRight = 0
     Dance = 1
     Jump = 2
-    SleepEntryFirst = 3
+    Boredom = 3
     SleepEntrySecond = 4
     SleepIdle = 5
     Petting = 6
-    Roll = 7
-    Spin = 8
-    GazeFirstHalf = 9
-    GazeSecondHalf = 10
-    CompanionEntry = 11
-    CompanionIdle = 12
-    CompanionExit = 13
-    Lifting = 14
-    PuttingDown = 15
+    GazeFirstHalf = 7
+    GazeSecondHalf = 8
+    CompanionEntry = 9
+    CompanionIdle = 10
+    CompanionExit = 11
+    Lifting = 12
+    PuttingDown = 13
 }
 
 $settingsDirectory = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'CorgiPetV24'
@@ -153,6 +151,7 @@ $script:dragChangedInteraction = $false
 $script:dragShouldLift = $false
 $script:userScale = [double]$settings.Scale
 $script:temporaryScale = 1.0
+$script:boredomResumeAt = [DateTime]::MaxValue
 
 function Get-PetFrame {
     param([int]$Row, [int]$Column)
@@ -307,6 +306,7 @@ function Stop-SpecialModes {
     $script:gazeUntil = [DateTime]::MinValue
     $script:gazeFrame = -1
     $script:walkUntil = [DateTime]::MinValue
+    $script:boredomResumeAt = [DateTime]::MaxValue
     Set-TemporaryScale -Multiplier 1.0
 }
 
@@ -394,14 +394,37 @@ function Start-Dance {
         Set-Animation -Row $rows.Dance -Frames ([int[]](0..7)) -IntervalMs 125 -Loops 2 -Completion {
             if ($script:state -ne 'interaction' -or $script:currentAction -ne 'dance') { return }
             Set-FacingLeft $false
-            Set-TemporaryScale -Multiplier 1.0
-            Finish-Interaction
+            Set-Animation -Row $rows.Dance -Frames ([int[]](0..7)) -IntervalMs 125 -Loops 2 -Completion {
+                if ($script:state -ne 'interaction' -or $script:currentAction -ne 'dance') { return }
+                Set-FacingLeft $true
+                Set-Animation -Row $rows.Dance -Frames ([int[]](0..7)) -IntervalMs 125 -Loops 2 -Completion {
+                    if ($script:state -ne 'interaction' -or $script:currentAction -ne 'dance') { return }
+                    Set-FacingLeft $false
+                    Set-TemporaryScale -Multiplier 1.0
+                    Finish-Interaction
+                }
+            }
         }
     }
 }
+
+function Start-Boredom {
+    Stop-SpecialModes
+    $script:state = 'interaction'
+    $script:currentAction = 'boredom'
+    $script:companionReady = $false
+    $script:sleepAt = [DateTime]::MaxValue
+    $script:autoRotateAt = [DateTime]::MaxValue
+    Set-FacingLeft $false
+    $framesBeforePause = [int[]]@(3, 4, 0, 1, 2, 5, 6)
+    Set-Animation -Row $rows.Boredom -Frames $framesBeforePause -IntervalMs 163 -Loops 1 -Completion {
+        if ($script:state -eq 'interaction' -and $script:currentAction -eq 'boredom') {
+            $script:boredomResumeAt = [DateTime]::UtcNow.AddSeconds(2)
+        }
+    }
+}
+
 function Start-Petting { Start-InteractionAnimation -Action 'petting' -Row $rows.Petting -Frames ([int[]](0..5)) -IntervalMs 200 -Loops 2 }
-function Start-Roll { Start-InteractionAnimation -Action 'roll' -Row $rows.Roll -Frames ([int[]](0..7)) -IntervalMs 150 -Loops 1 }
-function Start-Spin { Start-InteractionAnimation -Action 'spin' -Row $rows.Spin -Frames ([int[]](0..7)) -IntervalMs 125 -Loops 2 }
 function Start-Jump { Start-InteractionAnimation -Action 'jumping' -Row $rows.Jump -Frames ([int[]](0..4)) -IntervalMs 160 -Loops 3 }
 
 function Start-Gaze {
@@ -488,9 +511,8 @@ function Restore-ActionBeforeDrag {
         'sleep' { Start-Sleep; if ($script:appliedIdleAction -eq 'automatic') { Schedule-AutomaticRotation } }
         'gaze' { Start-Gaze; if ($script:appliedIdleAction -eq 'automatic') { Schedule-AutomaticRotation } }
         'dance' { Start-Dance }
+        'boredom' { Start-Boredom }
         'petting' { Start-Petting }
-        'roll' { Start-Roll }
-        'spin' { Start-Spin }
         'running' { Start-Walk -Mode 'running' }
         'jumping' { Start-Walk -Mode 'jumping' }
         default { Apply-IdleAction -Mode $script:appliedIdleAction }
@@ -602,11 +624,9 @@ function Update-Walk {
 }
 
 function Start-RandomInteraction {
-    switch (Get-Random -Minimum 0 -Maximum 5) {
+    switch (Get-Random -Minimum 0 -Maximum 3) {
         0 { Start-Dance }
         1 { Start-Petting }
-        2 { Start-Roll }
-        3 { Start-Spin }
         default { Start-Walk }
     }
 }
@@ -719,12 +739,11 @@ $menu.Items.Add((New-PetMenuItem '睡觉' { Start-Sleep; if ($script:appliedIdle
 $menu.Items.Add((New-PetMenuItem '注视' { Start-Gaze; if ($script:appliedIdleAction -eq 'automatic') { Schedule-AutomaticRotation } })) | Out-Null
 $menu.Items.Add((New-PetMenuItem '散步' { Start-Walk })) | Out-Null
 $menu.Items.Add((New-PetMenuItem '扭屁股' { Start-Dance })) | Out-Null
+$menu.Items.Add((New-PetMenuItem '无聊' { Start-Boredom })) | Out-Null
 
 $optimizationMenu = New-Object System.Windows.Controls.MenuItem
 $optimizationMenu.Header = '待优化'
 $optimizationMenu.Items.Add((New-PetMenuItem '摸摸' { Start-Petting })) | Out-Null
-$optimizationMenu.Items.Add((New-PetMenuItem '连贯打滚' { Start-Roll })) | Out-Null
-$optimizationMenu.Items.Add((New-PetMenuItem '芭蕾旋转' { Start-Spin })) | Out-Null
 $menu.Items.Add($optimizationMenu) | Out-Null
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 
@@ -879,6 +898,12 @@ $timer.Add_Tick({
     $now = [DateTime]::UtcNow
     $elapsed = [Math]::Min(0.10, [Math]::Max(0.0, ($now - $script:lastTickAt).TotalSeconds))
     $script:lastTickAt = $now
+
+    if ($script:state -eq 'interaction' -and $script:currentAction -eq 'boredom' -and $script:boredomResumeAt -ne [DateTime]::MaxValue) {
+        if ($now -lt $script:boredomResumeAt) { return }
+        $script:boredomResumeAt = [DateTime]::MaxValue
+        Set-Animation -Row $rows.Boredom -Frames ([int[]]@(7, 6, 5, 2, 1, 0, 4, 3)) -IntervalMs 163 -Loops 1 -Completion { Finish-Interaction }
+    }
 
     if ($null -ne $script:idleSelectionMode -and $now -ge $script:idleSelectionAt) {
         $pendingMode = $script:idleSelectionMode

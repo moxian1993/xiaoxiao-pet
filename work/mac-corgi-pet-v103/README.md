@@ -1,4 +1,4 @@
-# 柯基小小 v1.0.6 macOS 桌面宠物
+# 柯基小小 v1.0.7 macOS 桌面宠物
 
 这是一个完全独立的原生 macOS 应用，不依赖 Codex 或网络服务。
 
@@ -17,7 +17,7 @@
 ## 线上更新
 
 1. 修改代码或资源并更新 build 后，双击源码目录中的 `准备远端更新.command`。
-2. 在 GitHub 仓库创建新版 Release，上传 `update.json` 和 `Corgi-Xiaoxiao-macOS.zip`。
+2. 在 GitHub 仓库创建新版 Release，上传 `update.json`、`Corgi-Xiaoxiao-macOS.zip` 和 `Corgi-Xiaoxiao-Windows.zip`。
 3. 用户右键柯基并选择“更新”，确认后会在线下载、安装并自动重新打开。
 
 应用通过 `https://github.com/moxian1993/xiaoxiao-pet/releases/latest/download/update.json` 获取更新清单。下载后的安装包暂存在 `~/Library/Application Support/柯基小小/Updates`，旧版备份到同级 `Backups` 目录，安装日志保存在 `Logs/update.log`。如果线上只发布了相同或更低构建号，应用会提示已经是最新版本。单 build 更新会在更新前显示精炼内容，跨多个 build 时更新前不展示内容；安装成功提示会汇总本次跨过的全部版本内容。
